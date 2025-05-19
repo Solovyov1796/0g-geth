@@ -170,6 +170,8 @@ func main() {
 		doPurge(os.Args[2:])
 	case "sanitycheck":
 		doSanityCheck()
+	case "debug":
+		doDebug(os.Args[2:])
 	default:
 		log.Fatal("unknown command ", os.Args[1])
 	}
@@ -202,13 +204,15 @@ func doInstall(cmdline []string) {
 	}
 
 	// Configure the build.
-	gobuild := tc.Go("build", buildFlags(env, *staticlink, buildTags)...)
+	gobuild := tc.Go("build", buildFlags(env, *staticlink, false, buildTags)...)
 
 	// We use -trimpath to avoid leaking local paths into the built executables.
 	gobuild.Args = append(gobuild.Args, "-trimpath")
 
 	// Show packages during build.
 	gobuild.Args = append(gobuild.Args, "-v")
+
+	// gobuild.Args = append(gobuild.Args, "-gcflags=\"-N -l\"")
 
 	// Now we choose what we're even building.
 	// Default: collect all 'main' packages in cmd/ and build those.
@@ -227,7 +231,7 @@ func doInstall(cmdline []string) {
 }
 
 // buildFlags returns the go tool flags for building.
-func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (flags []string) {
+func buildFlags(env build.Environment, staticLinking, debug bool, buildTags []string) (flags []string) {
 	var ld []string
 	// See https://github.com/golang/go/issues/33772#issuecomment-528176001
 	// We need to set --buildid to the linker here, and also pass --build-id to the
@@ -249,7 +253,12 @@ func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (
 		// regarding the options --build-id=none and --strip-all. It is needed for
 		// reproducible builds; removing references to temporary files in C-land, and
 		// making build-id reproducibly absent.
-		extld := []string{"-Wl,-z,stack-size=0x800000,--build-id=none,--strip-all"}
+		var extld []string
+		if !debug {
+			extld = []string{"-Wl,-z,stack-size=0x800000,--build-id=none,--strip-all"}
+		} else {
+			extld = []string{"-Wl,-z,stack-size=0x800000,--build-id=none"}
+		}
 		if staticLinking {
 			extld = append(extld, "-static")
 			// Under static linking, use of certain glibc features must be
@@ -1182,4 +1191,55 @@ func doPurge(cmdline []string) {
 
 func doSanityCheck() {
 	build.DownloadAndVerifyChecksums(build.MustLoadChecksums("build/checksums.txt"))
+}
+
+func doDebug(cmdline []string) {
+	var (
+		dlgo       = flag.Bool("dlgo", false, "Download Go and build with it")
+		arch       = flag.String("arch", "", "Architecture to cross build for")
+		cc         = flag.String("cc", "", "C compiler to cross build with")
+		staticlink = flag.Bool("static", false, "Create statically-linked executable")
+	)
+	flag.CommandLine.Parse(cmdline)
+	env := build.Env()
+
+	// Configure the toolchain.
+	tc := build.GoToolchain{GOARCH: *arch, CC: *cc}
+	if *dlgo {
+		csdb := build.MustLoadChecksums("build/checksums.txt")
+		tc.Root = build.DownloadGo(csdb)
+	}
+	// Disable CLI markdown doc generation in release builds.
+	buildTags := []string{"urfave_cli_no_docs"}
+
+	// Enable linking the CKZG library since we can make it work with additional flags.
+	if env.UbuntuVersion != "trusty" {
+		buildTags = append(buildTags, "ckzg")
+	}
+
+	// Configure the build.
+	gobuild := tc.Go("build", buildFlags(env, *staticlink, true, buildTags)...)
+
+	// We use -trimpath to avoid leaking local paths into the built executables.
+	gobuild.Args = append(gobuild.Args, "-trimpath")
+
+	// Show packages during build.
+	gobuild.Args = append(gobuild.Args, "-v")
+
+	gobuild.Args = append(gobuild.Args, "-gcflags", "all=-N -l")
+
+	// Now we choose what we're even building.
+	// Default: collect all 'main' packages in cmd/ and build those.
+	packages := flag.Args()
+	if len(packages) == 0 {
+		packages = build.FindMainPackages("./cmd")
+	}
+
+	// Do the build!
+	for _, pkg := range packages {
+		args := slices.Clone(gobuild.Args)
+		args = append(args, "-o", executablePath(path.Base(pkg)))
+		args = append(args, pkg)
+		build.MustRun(&exec.Cmd{Path: gobuild.Path, Args: args, Env: gobuild.Env})
+	}
 }

@@ -40,7 +40,7 @@ profile.cov
 *.iml
 
 # VS Code
-.vscode
+# .vscode
 
 tests/spec-tests/
 
