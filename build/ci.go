@@ -149,7 +149,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "install":
-		doInstall(os.Args[2:])
+		doInstall(false, os.Args[2:])
 	case "test":
 		doTest(os.Args[2:])
 	case "lint":
@@ -170,6 +170,8 @@ func main() {
 		doPurge(os.Args[2:])
 	case "sanitycheck":
 		doSanityCheck()
+	case "debug":
+		doInstall(true, os.Args[2:])
 	default:
 		log.Fatal("unknown command ", os.Args[1])
 	}
@@ -177,7 +179,7 @@ func main() {
 
 // Compiling
 
-func doInstall(cmdline []string) {
+func doInstall(debug bool, cmdline []string) {
 	var (
 		dlgo       = flag.Bool("dlgo", false, "Download Go and build with it")
 		arch       = flag.String("arch", "", "Architecture to cross build for")
@@ -202,13 +204,17 @@ func doInstall(cmdline []string) {
 	}
 
 	// Configure the build.
-	gobuild := tc.Go("build", buildFlags(env, *staticlink, buildTags)...)
+	gobuild := tc.Go("build", buildFlags(env, *staticlink, debug, buildTags)...)
 
 	// We use -trimpath to avoid leaking local paths into the built executables.
 	gobuild.Args = append(gobuild.Args, "-trimpath")
 
 	// Show packages during build.
 	gobuild.Args = append(gobuild.Args, "-v")
+
+	if debug {
+		gobuild.Args = append(gobuild.Args, "-gcflags", "all=-N -l")
+	}
 
 	// Now we choose what we're even building.
 	// Default: collect all 'main' packages in cmd/ and build those.
@@ -227,7 +233,7 @@ func doInstall(cmdline []string) {
 }
 
 // buildFlags returns the go tool flags for building.
-func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (flags []string) {
+func buildFlags(env build.Environment, staticLinking, debug bool, buildTags []string) (flags []string) {
 	var ld []string
 	// See https://github.com/golang/go/issues/33772#issuecomment-528176001
 	// We need to set --buildid to the linker here, and also pass --build-id to the
@@ -249,7 +255,12 @@ func buildFlags(env build.Environment, staticLinking bool, buildTags []string) (
 		// regarding the options --build-id=none and --strip-all. It is needed for
 		// reproducible builds; removing references to temporary files in C-land, and
 		// making build-id reproducibly absent.
-		extld := []string{"-Wl,-z,stack-size=0x800000,--build-id=none,--strip-all"}
+		var extld []string
+		if !debug {
+			extld = []string{"-Wl,-z,stack-size=0x800000,--build-id=none,--strip-all"}
+		} else {
+			extld = []string{"-Wl,-z,stack-size=0x800000,--build-id=none"}
+		}
 		if staticLinking {
 			extld = append(extld, "-static")
 			// Under static linking, use of certain glibc features must be
